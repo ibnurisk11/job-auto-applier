@@ -1,0 +1,8 @@
+{
+  "keyword": "data analyst",
+  "sources": ["Glints", "LinkedIn", "Tech in Asia"],
+  "location": "Indonesia",
+  "max_pages": 3,
+  "delay": 1.0,
+  "max_jobs": 0
+}

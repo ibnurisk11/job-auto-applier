@@ -133,6 +133,7 @@ button.primary {
 .meta-grid { display: flex; gap: 12px 28px; flex-wrap: wrap; font-size: 14px; }
 .meta-grid b { color: var(--muted); font-weight: 600; }
 .hint { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+.note { color: #B45309; font-size: 13px; margin-top: 8px; font-weight: 600; }
 .toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
 .toolbar input { flex: 1 1 260px; }
 .downloads { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -217,7 +218,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
 <body>
 <div class="wrap">
   <div class="hero">
-    <span class="hero-badge">Jobstreet · Glints · LinkedIn · Tech in Asia</span>
+    <span class="hero-badge">Glints · LinkedIn · Tech in Asia</span>
     <h1>Job Scraper</h1>
     <p>Hasil scraping lowongan kerja — dibuka langsung di browser tanpa server.</p>
     <button id="theme-toggle" type="button">🌙 Gelap</button>
@@ -279,6 +280,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
     if (el) parent.appendChild(el);
   }
 
+  // Only http(s) links become clickable; blocks javascript: from scraped data.
   function safeUrl(raw) {
     try {
       var parsed = new URL(String(raw || ''), window.location.href);
@@ -308,6 +310,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
   function matches(job, query, source) {
     if (source && source !== 'Semua sumber' && String(job.source || '') !== source) return false;
     if (!query) return true;
+    // Deliberately excludes url/keyword/scraped_at: they are not useful to search.
     var fields = ['title', 'company', 'location', 'description', 'skills', 'source', 'salary', 'work_type', 'posted_date'];
     for (var i = 0; i < fields.length; i++) {
       var value = job[fields[i]];
@@ -522,9 +525,10 @@ def render_html(df, path, base_name, meta):
         for row in df.to_dict(orient="records")
     ]
     data_json = json.dumps(records, ensure_ascii=False, default=str)
-    # Prevent a description from closing the surrounding <script> element.
+    # Keep embedded JSON inside the <script>; also escape JS line separators.
     data_json = data_json.replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
 
+    # Derive options from actual records, not from the requested source list.
     sources = sorted(
         {str(row.get("source")) for row in records if str(row.get("source") or "").strip()}
     )
@@ -534,16 +538,26 @@ def render_html(df, path, base_name, meta):
     )
 
     kpi_html = _kpi(df)
+    # `notes` carries per-source warnings collected by main.run_scrape().
+    notes = meta.get("notes") or []
+    if isinstance(notes, str):
+        notes = [notes]
+    notes_html = "".join(
+        '<div class="note">⚠️ {text}</div>'.format(text=html.escape(str(note)))
+        for note in notes
+        if str(note).strip()
+    )
     meta_html = (
         "<div><b>Kata kunci:</b> {keyword}</div>"
         "<div><b>Sumber:</b> {sources}</div>"
         "<div><b>Lokasi:</b> {location}</div>"
-        "<div><b>Dibuat:</b> {generated}</div>"
+        "<div><b>Dibuat:</b> {generated}</div>{notes}"
     ).format(
         keyword=html.escape(str(meta.get("keyword", ""))),
         sources=html.escape(", ".join(meta.get("sources", [])) or "-"),
         location=html.escape(str(meta.get("location", "")) or "-"),
         generated=html.escape(str(meta.get("generated_at", ""))),
+        notes=notes_html,
     )
 
     downloads = "".join(

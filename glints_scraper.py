@@ -2,7 +2,7 @@ import json
 import re
 import time
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 from scraper import (
     CURRENCY_SYMBOL,
@@ -28,6 +28,7 @@ WORK_TYPE_MAP = {
 
 
 def _next_data(html):
+    """Read the Next.js `__NEXT_DATA__` payload embedded by the server."""
     match = re.search(
         r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
         html,
@@ -39,6 +40,7 @@ def _next_data(html):
 
 
 def _extract_description(desc_json):
+    """Accept editor.js-style blocks, a JSON string, or already-plain text."""
     if not desc_json:
         return ""
     if isinstance(desc_json, str):
@@ -73,6 +75,7 @@ def _format_salary(salaries):
         low, high = s.get("minAmount"), s.get("maxAmount")
         if not low and not high:
             continue
+        # Payload spelling varies between list and detail endpoints; default to IDR.
         symbol = CURRENCY_SYMBOL.get(s.get("CurrencyCode") or "IDR", "Rp")
         amounts = []
         for value in (low, high):
@@ -154,6 +157,7 @@ def _map_job(raw, keyword):
 
 
 def _slug_map(html):
+    """Collect job slugs from server-rendered hrefs; the API only returns IDs."""
     hrefs = re.findall(
         r'href="(/id/opportunities/jobs/([^/"]+)/'
         r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))",
@@ -162,10 +166,14 @@ def _slug_map(html):
     return {job_id: slug for _, slug, job_id in hrefs}
 
 
-def search_jobs(keyword, session=None, on_progress=None):
+def search_jobs(keyword, location="", session=None, on_progress=None):
+    """Fetch the first page of Glints results (the explore API has no paging here)."""
     session = session or _new_session()
     keyword = keyword.strip()
-    url = f"{SEARCH_URL}?keyword={quote(keyword)}"
+    params = {"keyword": keyword}
+    if location and location.strip():
+        params["location"] = location.strip()
+    url = f"{SEARCH_URL}?{urlencode(params)}"
     if on_progress:
         on_progress("search", 1, 1, url)
     html = _safe_get(session, url)
@@ -235,10 +243,23 @@ def get_job_detail(job, session=None, retries=2):
     return job
 
 
-def scrape(keyword, delay=1.0, max_jobs=None, on_progress=None):
+def scrape(
+    keyword,
+    location="",
+    max_pages=1,
+    delay=1.0,
+    max_jobs=None,
+    on_progress=None,
+):
+    # Accepted for config consistency; warn instead of silently ignoring the flag.
+    if max_pages and max_pages > 1:
+        print(
+            "   ⚠️ Glints: pagination belum didukung, hanya mengambil 1 halaman.",
+            flush=True,
+        )
     session = _new_session()
 
-    jobs = search_jobs(keyword, session, on_progress=on_progress)
+    jobs = search_jobs(keyword, location, session, on_progress=on_progress)
 
     if max_jobs:
         jobs = jobs[:max_jobs]

@@ -28,7 +28,13 @@ from html_report import render_html
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
-SOURCE_NAMES = ["Jobstreet", "Glints", "LinkedIn", "Tech in Asia"]
+SOURCE_NAMES = ["Glints", "LinkedIn", "Tech in Asia"]
+UNSUPPORTED_SOURCES = {
+    "jobstreet": (
+        "Jobstreet sedang tidak didukung (HTTP 403). "
+        "Pilih: Glints, LinkedIn, Tech in Asia."
+    )
+}
 DEFAULTS = {
     "keyword": "data analyst",
     "sources": ["Glints", "LinkedIn", "Tech in Asia"],
@@ -40,6 +46,7 @@ DEFAULTS = {
 
 
 def load_config(path):
+    """Load known defaults from JSON; unknown keys are ignored on purpose."""
     config = dict(DEFAULTS)
     if not os.path.exists(path):
         return config
@@ -52,6 +59,7 @@ def load_config(path):
     if not isinstance(data, dict):
         print(f"Peringatan: isi {path} bukan objek JSON, memakai nilai default.")
         return config
+    # Only copy recognized keys so a stale/typo key cannot silently change behavior.
     for key in DEFAULTS:
         if key in data:
             config[key] = data[key]
@@ -64,8 +72,8 @@ def parse_args():
     )
     parser.add_argument("--config", default=CONFIG_PATH, help="Path ke file konfigurasi JSON")
     parser.add_argument("--keyword", help="Posisi / skill yang dicari")
-    parser.add_argument("--sources", nargs="+", metavar="SOURCE", help="Sumber: Jobstreet Glints LinkedIn 'Tech in Asia'")
-    parser.add_argument("--location", help="Lokasi untuk LinkedIn dan Tech in Asia")
+    parser.add_argument("--sources", nargs="+", metavar="SOURCE", help="Sumber: Glints LinkedIn 'Tech in Asia'")
+    parser.add_argument("--location", help="Lokasi untuk Glints, LinkedIn, dan Tech in Asia")
     parser.add_argument("--pages", "--max-pages", dest="max_pages", type=int, help="Jumlah halaman")
     parser.add_argument("--delay", type=float, help="Jeda antar request dalam detik")
     parser.add_argument("--max-jobs", type=int, help="Batas job per sumber (0 = semua)")
@@ -73,6 +81,7 @@ def parse_args():
 
 
 def resolve_settings(args):
+    """Merge file config + CLI overrides, then validate before any network call."""
     settings = load_config(args.config)
     overrides = {
         "keyword": args.keyword,
@@ -98,7 +107,11 @@ def resolve_settings(args):
         name = str(item).strip()
         if not name:
             continue
-        canonical = source_lookup.get(name.lower())
+        lowered = name.lower()
+        # Fail early with a specific message instead of sending traffic to a blocked site.
+        if lowered in UNSUPPORTED_SOURCES:
+            raise ValueError(UNSUPPORTED_SOURCES[lowered])
+        canonical = source_lookup.get(lowered)
         if canonical is None:
             raise ValueError(f"Sumber '{name}' tidak dikenal. Pilihan: {', '.join(SOURCE_NAMES)}")
         if canonical not in sources:
@@ -132,17 +145,11 @@ def console_progress(stage, current, total, label=""):
 
 def scrape_source(source, keyword, settings):
     limit = settings["max_jobs"] or None
-    if source == "Jobstreet":
-        return scraper.scrape(
-            keyword,
-            max_pages=settings["max_pages"],
-            delay=settings["delay"],
-            max_jobs=limit,
-            on_progress=console_progress,
-        )
     if source == "Glints":
         return glints_scraper.scrape(
             keyword,
+            location=settings["location"],
+            max_pages=settings["max_pages"],
             delay=settings["delay"],
             max_jobs=limit,
             on_progress=console_progress,
@@ -167,26 +174,38 @@ def scrape_source(source, keyword, settings):
 
 
 def run_scrape(settings):
+    """Scrape every selected source independently; one failure must not stop the rest."""
     all_jobs = []
+    empty_sources = []
     for source in settings["sources"]:
         print(f"▶️  Scraping dari {source}...", flush=True)
         try:
             jobs = scrape_source(source, settings["keyword"], settings)
         except scraper.ScraperError as exc:
             print(f"   Gagal scraping {source}: {exc}", flush=True)
-            continue
+            empty_sources.append(source)
+            continue  # Keep results from sources that already succeeded.
         except Exception as exc:
             print(f"   Error tak terduga saat scraping {source}: {type(exc).__name__}: {exc}", flush=True)
+            empty_sources.append(source)
             continue
-        print(f"   {source}: {len(jobs)} lowongan", flush=True)
+        if not jobs:
+            empty_sources.append(source)
+            print(
+                f"   ⚠️ {source}: 0 lowongan — kemungkinan perubahan struktur/API.",
+                flush=True,
+            )
+        else:
+            print(f"   {source}: {len(jobs)} lowongan", flush=True)
         all_jobs.extend(jobs)
 
     if not all_jobs:
-        return None
-    return scraper.to_dataframe(all_jobs)
+        return None, empty_sources
+    return scraper.to_dataframe(all_jobs), empty_sources
 
 
 def save_output(df, keyword, stamp):
+    """Write CSV/XLSX/JSON with a shared timestamped basename; return that basename."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     base_name = f"{scraper.slugify(keyword) or 'jobs'}_{stamp}"
     scraper.save_csv(df, os.path.join(OUTPUT_DIR, f"{base_name}.csv"))
@@ -213,7 +232,7 @@ def main():
         f"(lokasi: {settings['location']}, halaman: {settings['max_pages']}, jeda: {settings['delay']}s)"
     )
 
-    df = run_scrape(settings)
+    df, empty_sources = run_scrape(settings)
     if df is None:
         print("Tidak ada lowongan ditemukan.")
         return 1
@@ -231,6 +250,10 @@ def main():
             "sources": settings["sources"],
             "location": settings["location"],
             "generated_at": generated_at,
+            "notes": [
+                f"{source}: 0 lowongan — kemungkinan perubahan struktur/API."
+                for source in empty_sources
+            ],
         },
     )
 

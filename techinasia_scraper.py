@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -12,8 +13,11 @@ from scraper import CURRENCY_SYMBOL, ScraperError, _new_session, relative_date
 SOURCE = "Tech in Asia"
 
 ALGOLIA_URL = "https://219wx3mpv4-dsn.algolia.net/1/indexes/*/queries"
-APP_ID = "219WX3MPV4"
-API_KEY = "b528008a75dc1c4402bfe0d8db8b3f8e"
+# Search-only Algolia credentials; override through env vars when possible.
+DEFAULT_APP_ID = "219WX3MPV4"
+DEFAULT_API_KEY = "b528008a75dc1c4402bfe0d8db8b3f8e"
+APP_ID = os.environ.get("TECHINASIA_ALGOLIA_APP_ID", DEFAULT_APP_ID)
+API_KEY = os.environ.get("TECHINASIA_ALGOLIA_API_KEY", DEFAULT_API_KEY)
 INDEX_NAME = "job_postings"
 
 DETAIL_URL = "https://www.techinasia.com/jobs/{job_id}"
@@ -30,6 +34,7 @@ WORK_TYPE_MAP = {
 }
 
 def _algolia_params(keyword, location, page, hits_per_page=100):
+    """Build Algolia query; location is an exact facet, so spelling must match."""
     params = {
         "query": keyword,
         "hitsPerPage": hits_per_page,
@@ -42,6 +47,7 @@ def _algolia_params(keyword, location, page, hits_per_page=100):
 
 
 def _safe_post(session, url, body, params=None, retries=3, timeout=30):
+    """POST with bounded retries; network/JSON errors are treated as retryable."""
     for attempt in range(1, retries + 1):
         try:
             resp = session.post(url, params=params, json=body, timeout=timeout)
@@ -102,6 +108,7 @@ def _extract_skills(hit):
 
 
 def _map_job(hit, keyword):
+    """The Algolia hit already contains description and skills; no detail call needed."""
     city = hit.get("city") or {}
     location = ", ".join(
         part for part in (city.get("name"), city.get("country_name")) if part
@@ -168,6 +175,13 @@ def search_jobs(
 
 
 def scrape(keyword, location="", max_pages=3, delay=1.0, max_jobs=None, on_progress=None):
+    # Import-time warning would fire even when only other sources are selected.
+    if API_KEY == DEFAULT_API_KEY:
+        print(
+            "   ⚠️ Tech in Asia: Algolia API key default digunakan; "
+            "set TECHINASIA_ALGOLIA_API_KEY untuk override.",
+            flush=True,
+        )
     session = _new_session()
 
     jobs = search_jobs(

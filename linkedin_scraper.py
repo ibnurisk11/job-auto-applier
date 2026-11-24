@@ -8,6 +8,7 @@ from scraper import ScraperError, _new_session, _safe_get
 
 SOURCE = "LinkedIn"
 
+# Guest endpoint: returns job cards as HTML without requiring a login session.
 SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 DETAIL_URL = "https://www.linkedin.com/jobs/view/{job_id}"
 
@@ -36,6 +37,7 @@ def _map_work_type(value):
 
 
 def _parse_cards(html, keyword):
+    """Parse guest cards; the numeric ID comes from `data-entity-urn`."""
     soup = BeautifulSoup(html, "html.parser")
     jobs = []
     for card in soup.select("div.base-search-card"):
@@ -109,6 +111,7 @@ def search_jobs(
             break
         # The guest API returns a variable number of cards (usually 10), so
         # advance by what we actually got instead of a fixed page size.
+        # Duplicates across pages are removed below via `seen`.
         start += len(page_jobs)
         new_jobs = [j for j in page_jobs if j["job_id"] not in seen]
         for job in new_jobs:
@@ -121,6 +124,7 @@ def search_jobs(
 
 
 def get_job_detail(job, session=None, retries=2):
+    """Enrich a card in place; detail markup varies, so every selector is optional."""
     session = session or _new_session()
     url = DETAIL_URL.format(job_id=job["job_id"])
     try:
@@ -161,6 +165,7 @@ def get_job_detail(job, session=None, retries=2):
     if desc_el:
         job["description"] = desc_el.get_text("\n", strip=True)
 
+    # "Employment type" is localized ("Jenis pekerjaan" in Indonesian).
     criteria = {}
     for item in soup.select("li.description__job-criteria-item"):
         header = item.select_one(".description__job-criteria-subheader")

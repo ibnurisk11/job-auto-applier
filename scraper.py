@@ -1,3 +1,10 @@
+"""Helper umum + scraper Jobstreet (deprecated).
+
+Fungsi scraping Jobstreet di modul ini tidak lagi dipakai oleh ``main.py`` karena
+situs mengembalikan HTTP 403. Helper seperti ``slugify``, ``_safe_get``, dan
+``to_dataframe`` masih dipakai bersama scraper lain.
+"""
+
 import os
 import re
 import time
@@ -84,6 +91,7 @@ def _new_session():
 
 
 def _safe_get(session, url, params=None, retries=3, timeout=30):
+    """GET with bounded retries: retry 429/5xx, but do not retry other 4xx errors."""
     status = None
     for attempt in range(1, retries + 1):
         try:
@@ -108,6 +116,7 @@ def _safe_get(session, url, params=None, retries=3, timeout=30):
 
 
 def _parse_card(card, keyword):
+    """Parse a Jobstreet card; requires data-automation attributes and /job/<id> href."""
     job_id = None
     title = None
     url = None
@@ -167,6 +176,7 @@ def search_jobs(keyword, max_pages=3, delay=1.0, session=None, on_progress=None)
     seen = set()
     results = []
 
+    # Stop early on an empty page; keep earlier pages if a later request fails.
     for page in range(1, max_pages + 1):
         url = f"{BASE_URL}/{slugify(keyword)}-jobs?page={page}"
         if on_progress:
@@ -192,6 +202,7 @@ def search_jobs(keyword, max_pages=3, delay=1.0, session=None, on_progress=None)
 
 
 def get_job_detail(job, session=None, retries=2):
+    """Enrich a search-result dict in place; missing selectors keep card values."""
     session = session or _new_session()
     url = f"{BASE_URL}/job/{job['job_id']}"
     try:
@@ -264,10 +275,12 @@ def scrape(keyword, max_pages=3, delay=1.0, max_jobs=None, on_progress=None):
 
 
 def to_dataframe(jobs):
+    """Force a stable column order even when some scrapers omit a field."""
     return pd.DataFrame(jobs, columns=COLUMNS)
 
 
 def save_csv(df, path):
+    """Use utf-8-sig so Excel on Windows detects non-ASCII job titles correctly."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8-sig")
     return path

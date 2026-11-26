@@ -11,21 +11,7 @@ from string import Template
 
 import pandas as pd
 
-COLUMNS = [
-    "source",
-    "keyword",
-    "job_id",
-    "title",
-    "url",
-    "company",
-    "location",
-    "salary",
-    "work_type",
-    "posted_date",
-    "description",
-    "skills",
-    "scraped_at",
-]
+from schema import COLUMNS  # re-export agar import lama tetap bekerja
 
 TEMPLATE = Template(
     """<!doctype html>
@@ -251,7 +237,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
       </select>
       <button id="view-toggle" type="button">📋 Lihat tabel</button>
     </div>
-    <div class="count" id="count"></div>
+    <div class="count" id="count" aria-live="polite"></div>
     <div id="results"></div>
     <div class="pager" id="pager"></div>
   </div>
@@ -460,10 +446,20 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
     byId('view-toggle').textContent = state.view === 'cards' ? '📋 Lihat tabel' : '🃏 Lihat kartu';
     render();
   });
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    byId('theme-toggle').textContent = theme === 'dark' ? '☀️ Terang' : '🌙 Gelap';
+  }
+
+  var savedTheme = null;
+  try { savedTheme = localStorage.getItem('job-scraper-theme'); } catch (err) {}
+  if (savedTheme === 'dark' || savedTheme === 'light') applyTheme(savedTheme);
+
   byId('theme-toggle').addEventListener('click', function () {
     var dark = document.documentElement.getAttribute('data-theme') === 'dark';
-    document.documentElement.setAttribute('data-theme', dark ? 'light' : 'dark');
-    byId('theme-toggle').textContent = dark ? '🌙 Gelap' : '☀️ Terang';
+    var next = dark ? 'light' : 'dark';
+    applyTheme(next);
+    try { localStorage.setItem('job-scraper-theme', next); } catch (err) {}
   });
 
   render();
@@ -533,7 +529,7 @@ def render_html(df, path, base_name, meta):
         {str(row.get("source")) for row in records if str(row.get("source") or "").strip()}
     )
     source_options = '<option value="Semua sumber">Semua sumber</option>' + "".join(
-        '<option value="{value}">{value}</option>'.format(value=html.escape(source))
+        '<option value="{value}">{value}</option>'.format(value=html.escape(source, quote=True))
         for source in sources
     )
 

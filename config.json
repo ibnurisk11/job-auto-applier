@@ -4,5 +4,8 @@
   "location": "Indonesia",
   "max_pages": 3,
   "delay": 1.0,
-  "max_jobs": 0
+  "max_jobs": 0,
+  "respect_robots": false,
+  "algolia_app_id": "",
+  "algolia_api_key": ""
 }

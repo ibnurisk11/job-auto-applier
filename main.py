@@ -21,6 +21,7 @@ for stream in (sys.stdout, sys.stderr):
 
 import glints_scraper
 import linkedin_scraper
+import schema
 import scraper
 import techinasia_scraper
 from html_report import render_html
@@ -29,6 +30,11 @@ OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 SOURCE_NAMES = ["Glints", "LinkedIn", "Tech in Asia"]
+SCRAPERS = {
+    "Glints": glints_scraper.scrape,
+    "LinkedIn": linkedin_scraper.scrape,
+    "Tech in Asia": techinasia_scraper.scrape,
+}
 UNSUPPORTED_SOURCES = {
     "jobstreet": (
         "Jobstreet sedang tidak didukung (HTTP 403). "
@@ -36,12 +42,15 @@ UNSUPPORTED_SOURCES = {
     )
 }
 DEFAULTS = {
-    "keyword": "data analyst",
+    "keyword": "web developer",
     "sources": ["Glints", "LinkedIn", "Tech in Asia"],
-    "location": "Remote",
-    "max_pages": 3,
+    "location": "Bandung",
+    "max_pages": 5,
     "delay": 1.0,
     "max_jobs": 0,
+    "respect_robots": False,
+    "algolia_app_id": "",
+    "algolia_api_key": "",
 }
 
 
@@ -77,6 +86,13 @@ def parse_args():
     parser.add_argument("--pages", "--max-pages", dest="max_pages", type=int, help="Jumlah halaman")
     parser.add_argument("--delay", type=float, help="Jeda antar request dalam detik")
     parser.add_argument("--max-jobs", type=int, help="Batas job per sumber (0 = semua)")
+    parser.add_argument(
+        "--respect-robots",
+        action="store_true",
+        help="Lewati URL yang dilarang robots.txt (opt-in; bisa memblokir sebagian sumber)",
+    )
+    parser.add_argument("--algolia-app-id", help="Override Algolia app ID untuk Tech in Asia")
+    parser.add_argument("--algolia-api-key", help="Override Algolia API key untuk Tech in Asia")
     return parser.parse_args()
 
 
@@ -126,6 +142,21 @@ def resolve_settings(args):
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Nilai max_pages / delay / max_jobs tidak valid: {exc}") from exc
 
+    # getattr keeps older callers/tests (with a smaller Namespace) working.
+    respect_robots = bool(
+        getattr(args, "respect_robots", False) or settings.get("respect_robots", False)
+    )
+    app_id = (
+        getattr(args, "algolia_app_id", None)
+        or os.environ.get("TECHINASIA_ALGOLIA_APP_ID")
+        or str(settings.get("algolia_app_id") or "")
+    )
+    api_key = (
+        getattr(args, "algolia_api_key", None)
+        or os.environ.get("TECHINASIA_ALGOLIA_API_KEY")
+        or str(settings.get("algolia_api_key") or "")
+    )
+
     return {
         "keyword": str(settings["keyword"]).strip(),
         "sources": sources,
@@ -133,6 +164,9 @@ def resolve_settings(args):
         "max_pages": max_pages,
         "delay": delay,
         "max_jobs": max_jobs,
+        "respect_robots": respect_robots,
+        "algolia_app_id": app_id,
+        "algolia_api_key": api_key,
     }
 
 
@@ -144,55 +178,72 @@ def console_progress(stage, current, total, label=""):
 
 
 def scrape_source(source, keyword, settings):
-    limit = settings["max_jobs"] or None
-    if source == "Glints":
-        return glints_scraper.scrape(
-            keyword,
-            location=settings["location"],
-            max_pages=settings["max_pages"],
-            delay=settings["delay"],
-            max_jobs=limit,
-            on_progress=console_progress,
-        )
-    if source == "LinkedIn":
-        return linkedin_scraper.scrape(
-            keyword,
-            location=settings["location"],
-            max_pages=settings["max_pages"],
-            delay=settings["delay"],
-            max_jobs=limit,
-            on_progress=console_progress,
-        )
-    return techinasia_scraper.scrape(
-        keyword,
-        location=settings["location"],
-        max_pages=settings["max_pages"],
-        delay=settings["delay"],
-        max_jobs=limit,
-        on_progress=console_progress,
-    )
+    kwargs = {
+        "keyword": keyword,
+        "location": settings["location"],
+        "max_pages": settings["max_pages"],
+        "delay": settings["delay"],
+        "max_jobs": settings["max_jobs"] or None,
+        "on_progress": console_progress,
+    }
+    if source == "Tech in Asia":
+        kwargs["app_id"] = settings.get("algolia_app_id") or None
+        kwargs["api_key"] = settings.get("algolia_api_key") or None
+    return SCRAPERS[source](**kwargs)
+
+
+def dedupe_jobs(jobs):
+    """Gabungkan lowongan yang sama lintas sumber; simpan sumber lain di ``also_on``."""
+    merged = {}
+    order = []
+    for job in jobs:
+        fingerprint = schema.job_fingerprint(job)
+        if not any(fingerprint):
+            order.append(job)
+            continue
+        existing = merged.get(fingerprint)
+        if existing is None:
+            merged[fingerprint] = job
+            order.append(job)
+            continue
+
+        for column in schema.COLUMNS:
+            if not existing.get(column) and job.get(column):
+                existing[column] = job[column]
+
+        others = []
+        for value in (job.get("source"), existing.get("also_on")):
+            for part in str(value or "").split(","):
+                part = part.strip()
+                if part and part != existing.get("source") and part not in others:
+                    others.append(part)
+        existing["also_on"] = ", ".join(others)
+    return order
 
 
 def run_scrape(settings):
-    """Scrape every selected source independently; one failure must not stop the rest."""
+    """Scrape tiap sumber secara independen; kegagalan satu tidak menghentikan lain."""
     all_jobs = []
-    empty_sources = []
+    issues = []
     for source in settings["sources"]:
         print(f"▶️  Scraping dari {source}...", flush=True)
         try:
             jobs = scrape_source(source, settings["keyword"], settings)
         except scraper.ScraperError as exc:
-            print(f"   Gagal scraping {source}: {exc}", flush=True)
-            empty_sources.append(source)
-            continue  # Keep results from sources that already succeeded.
-        except Exception as exc:
-            print(f"   Error tak terduga saat scraping {source}: {type(exc).__name__}: {exc}", flush=True)
-            empty_sources.append(source)
+            message = str(exc)
+            print(f"   Gagal scraping {source}: {message}", flush=True)
+            issues.append({"source": source, "kind": "error", "message": message})
             continue
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            print(f"   Error tak terduga saat scraping {source}: {message}", flush=True)
+            issues.append({"source": source, "kind": "error", "message": message})
+            continue
+
         if not jobs:
-            empty_sources.append(source)
+            issues.append({"source": source, "kind": "empty", "message": "0 lowongan"})
             print(
-                f"   ⚠️ {source}: 0 lowongan — kemungkinan perubahan struktur/API.",
+                f"   ⚠️ {source}: 0 lowongan — tidak ada hasil atau struktur/API berubah.",
                 flush=True,
             )
         else:
@@ -200,23 +251,31 @@ def run_scrape(settings):
         all_jobs.extend(jobs)
 
     if not all_jobs:
-        return None, empty_sources
-    return scraper.to_dataframe(all_jobs), empty_sources
+        return None, issues
+    return scraper.to_dataframe(dedupe_jobs(all_jobs)), issues
 
 
 def save_output(df, keyword, stamp):
-    """Write CSV/XLSX/JSON with a shared timestamped basename; return that basename."""
+    """Tulis CSV/XLSX/JSON dengan basename berTimestamp yang sama."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     base_name = f"{scraper.slugify(keyword) or 'jobs'}_{stamp}"
     scraper.save_csv(df, os.path.join(OUTPUT_DIR, f"{base_name}.csv"))
     scraper.save_xlsx(df, os.path.join(OUTPUT_DIR, f"{base_name}.xlsx"))
-    df.to_json(
-        os.path.join(OUTPUT_DIR, f"{base_name}.json"),
-        orient="records",
-        force_ascii=False,
-        indent=2,
-    )
+    scraper.save_json(df, os.path.join(OUTPUT_DIR, f"{base_name}.json"))
     return base_name
+
+
+def build_notes(issues):
+    """Bedakan 'sumber gagal' dari 'sumber sukses tapi kosong' di laporan."""
+    notes = []
+    for issue in issues:
+        if issue["kind"] == "error":
+            notes.append(f"{issue['source']}: gagal scraping — {issue['message']}")
+        else:
+            notes.append(
+                f"{issue['source']}: 0 lowongan (tidak ada hasil atau struktur/API berubah)"
+            )
+    return notes
 
 
 def main():
@@ -227,18 +286,20 @@ def main():
         print(f"Error: {exc}")
         return 1
 
+    scraper.set_respect_robots(settings["respect_robots"])
     print(
         f"Mencari '{settings['keyword']}' dari {', '.join(settings['sources'])} "
         f"(lokasi: {settings['location']}, halaman: {settings['max_pages']}, jeda: {settings['delay']}s)"
     )
 
-    df, empty_sources = run_scrape(settings)
+    df, issues = run_scrape(settings)
     if df is None:
         print("Tidak ada lowongan ditemukan.")
         return 1
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    generated_at = datetime.now().strftime("%d %b %Y %H:%M:%S")
+    now = datetime.now()
+    stamp = now.strftime("%Y%m%d_%H%M%S")
+    generated_at = now.strftime("%d %b %Y %H:%M:%S")
     base_name = save_output(df, settings["keyword"], stamp)
     html_path = os.path.join(OUTPUT_DIR, f"{base_name}.html")
     render_html(
@@ -250,10 +311,7 @@ def main():
             "sources": settings["sources"],
             "location": settings["location"],
             "generated_at": generated_at,
-            "notes": [
-                f"{source}: 0 lowongan — kemungkinan perubahan struktur/API."
-                for source in empty_sources
-            ],
+            "notes": build_notes(issues),
         },
     )
 

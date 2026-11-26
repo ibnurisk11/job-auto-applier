@@ -1,16 +1,11 @@
 import json
 import re
-import time
 from datetime import datetime
 from urllib.parse import urlencode
 
-from scraper import (
-    CURRENCY_SYMBOL,
-    ScraperError,
-    _new_session,
-    _safe_get,
-    relative_date,
-)
+from base_scraper import run_scrape
+from schema import empty_job, relative_date, salary_info
+from scraper import ScraperError, _new_session, _safe_get
 
 SOURCE = "Glints"
 
@@ -28,7 +23,7 @@ WORK_TYPE_MAP = {
 
 
 def _next_data(html):
-    """Read the Next.js `__NEXT_DATA__` payload embedded by the server."""
+    """Baca payload Next.js ``__NEXT_DATA__`` yang disisipkan server."""
     match = re.search(
         r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
         html,
@@ -40,7 +35,7 @@ def _next_data(html):
 
 
 def _extract_description(desc_json):
-    """Accept editor.js-style blocks, a JSON string, or already-plain text."""
+    """Terima blok editor.js, string JSON, atau teks biasa."""
     if not desc_json:
         return ""
     if isinstance(desc_json, str):
@@ -65,42 +60,46 @@ def _extract_description(desc_json):
     return str(data)
 
 
-def _format_salary(salaries):
-    if not salaries:
-        return ""
-    parts = []
-    for s in salaries:
-        if not isinstance(s, dict):
+def _salary_fields(salaries):
+    """Gabungkan beberapa entry gaji menjadi string tampilan + angka."""
+    displays = []
+    numbers = {}
+    for item in salaries or []:
+        if not isinstance(item, dict):
             continue
-        low, high = s.get("minAmount"), s.get("maxAmount")
-        if not low and not high:
-            continue
-        # Payload spelling varies between list and detail endpoints; default to IDR.
-        symbol = CURRENCY_SYMBOL.get(s.get("CurrencyCode") or "IDR", "Rp")
-        amounts = []
-        for value in (low, high):
-            if value:
-                try:
-                    amounts.append(f"{symbol} {int(value):,}")
-                except (TypeError, ValueError):
-                    amounts.append(str(value))
-        rng = " - ".join(amounts)
-        mode = (s.get("salaryMode") or "").lower()
-        suffix = {"month": "per month", "year": "per year", "day": "per day"}.get(
-            mode, ""
+        info = salary_info(
+            item.get("minAmount"),
+            item.get("maxAmount"),
+            item.get("CurrencyCode") or "IDR",
+            item.get("salaryMode"),
+            default_symbol="Rp",
         )
-        parts.append(f"{rng} {suffix}".strip())
-    return "; ".join(p for p in parts if p)
+        if info["salary"]:
+            displays.append(info["salary"])
+            if not numbers:
+                numbers = {key: value for key, value in info.items() if key != "salary"}
+    result = {"salary": "; ".join(displays)}
+    result.update(
+        {
+            "salary_min": "",
+            "salary_max": "",
+            "currency": "",
+            "salary_period": "",
+        }
+    )
+    result.update(numbers)
+    return result
 
 
-def _relative_date(iso):
-    if not iso:
-        return ""
+def _posted(raw):
+    """Kembalikan (tampilan relatif, ISO absolut) dari ``createdAt``."""
+    if not raw:
+        return "", ""
     try:
-        created = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        created = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
     except ValueError:
-        return ""
-    return relative_date(created)
+        return "", ""
+    return relative_date(created), created.isoformat(timespec="seconds")
 
 
 def _map_work_type(value):
@@ -110,19 +109,17 @@ def _map_work_type(value):
 
 
 def _extract_skills(raw):
-    skills = raw.get("skills")
-    if not skills:
-        skills = raw.get("JobSkills")
+    skills = raw.get("skills") or raw.get("JobSkills")
     if not skills:
         return ""
     names = []
-    for sk in skills:
-        if not isinstance(sk, dict):
+    for skill in skills:
+        if not isinstance(skill, dict):
             continue
-        if isinstance(sk.get("skill"), dict):
-            name = sk["skill"].get("name")
+        if isinstance(skill.get("skill"), dict):
+            name = skill["skill"].get("name")
         else:
-            name = sk.get("name") or sk.get("skillName")
+            name = skill.get("name") or skill.get("skillName")
         if name:
             names.append(str(name))
     return ", ".join(names)
@@ -130,34 +127,35 @@ def _extract_skills(raw):
 
 def _map_job(raw, keyword):
     location = ""
-    loc = raw.get("location")
-    if isinstance(loc, dict) and loc.get("formattedName"):
-        location = loc["formattedName"]
+    place = raw.get("location")
+    if isinstance(place, dict) and place.get("formattedName"):
+        location = place["formattedName"]
 
     company = ""
-    comp = raw.get("company")
-    if isinstance(comp, dict):
-        company = comp.get("name") or ""
+    org = raw.get("company")
+    if isinstance(org, dict):
+        company = org.get("name") or ""
 
-    return {
-        "source": SOURCE,
-        "keyword": keyword,
-        "job_id": str(raw.get("id", "")),
-        "title": raw.get("title") or "",
-        "url": "",
-        "company": company,
-        "location": location,
-        "salary": _format_salary(raw.get("salaries")),
-        "work_type": _map_work_type(raw.get("type")),
-        "posted_date": _relative_date(raw.get("createdAt")),
-        "description": "",
-        "skills": _extract_skills(raw),
-        "scraped_at": "",
-    }
+    posted_text, posted_at = _posted(raw.get("createdAt"))
+    job = empty_job(SOURCE, keyword)
+    job.update(
+        {
+            "job_id": str(raw.get("id", "")),
+            "title": raw.get("title") or "",
+            "company": company,
+            "location": location,
+            "work_type": _map_work_type(raw.get("type")),
+            "posted_date": posted_text,
+            "posted_at": posted_at,
+            "skills": _extract_skills(raw),
+        }
+    )
+    job.update(_salary_fields(raw.get("salaries")))
+    return job
 
 
 def _slug_map(html):
-    """Collect job slugs from server-rendered hrefs; the API only returns IDs."""
+    """Kumpulkan slug dari href server-rendered; API hanya memberi ID."""
     hrefs = re.findall(
         r'href="(/id/opportunities/jobs/([^/"]+)/'
         r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))",
@@ -166,8 +164,8 @@ def _slug_map(html):
     return {job_id: slug for _, slug, job_id in hrefs}
 
 
-def search_jobs(keyword, location="", session=None, on_progress=None):
-    """Fetch the first page of Glints results (the explore API has no paging here)."""
+def search_jobs(keyword, location="", session=None, on_progress=None, max_jobs=None):
+    """Ambil halaman pertama hasil Glints (API explore tidak menyediakan paging)."""
     session = session or _new_session()
     keyword = keyword.strip()
     params = {"keyword": keyword}
@@ -180,10 +178,10 @@ def search_jobs(keyword, location="", session=None, on_progress=None):
     data = _next_data(html)
     if not data:
         return []
-    initial = (
-        data.get("props", {}).get("pageProps", {}).get("initialJobs") or {}
-    )
+    initial = data.get("props", {}).get("pageProps", {}).get("initialJobs") or {}
     raw_jobs = initial.get("jobsInPage") or []
+    if max_jobs:
+        raw_jobs = raw_jobs[:max_jobs]
     slugs = _slug_map(html)
 
     jobs = []
@@ -224,18 +222,22 @@ def get_job_detail(job, session=None, retries=2):
 
     if raw.get("title"):
         job["title"] = raw["title"]
-    comp = raw.get("company") or {}
-    if isinstance(comp, dict) and comp.get("name"):
-        job["company"] = comp["name"]
+    company = raw.get("company") or {}
+    if isinstance(company, dict) and company.get("name"):
+        job["company"] = company["name"]
     if raw.get("descriptionJsonString"):
         job["description"] = _extract_description(raw["descriptionJsonString"])
     if raw.get("type"):
         job["work_type"] = _map_work_type(raw["type"])
     if raw.get("createdAt"):
-        job["posted_date"] = _relative_date(raw["createdAt"])
-    salary = _format_salary(raw.get("salaries"))
-    if salary:
-        job["salary"] = salary
+        posted_text, posted_at = _posted(raw["createdAt"])
+        if posted_text:
+            job["posted_date"] = posted_text
+        if posted_at:
+            job["posted_at"] = posted_at
+    salary = _salary_fields(raw.get("salaries"))
+    if salary["salary"]:
+        job.update(salary)
     skills = _extract_skills(raw)
     if skills:
         job["skills"] = skills
@@ -243,37 +245,28 @@ def get_job_detail(job, session=None, retries=2):
     return job
 
 
-def scrape(
-    keyword,
-    location="",
-    max_pages=1,
-    delay=1.0,
-    max_jobs=None,
-    on_progress=None,
-):
-    # Accepted for config consistency; warn instead of silently ignoring the flag.
+def scrape(keyword, location="", max_pages=1, delay=1.0, max_jobs=None, on_progress=None):
+    # Diterima agar config konsisten; beri peringatan instead of diam-diam diabaikan.
     if max_pages and max_pages > 1:
         print(
             "   ⚠️ Glints: pagination belum didukung, hanya mengambil 1 halaman.",
             flush=True,
         )
-    session = _new_session()
 
-    jobs = search_jobs(keyword, location, session, on_progress=on_progress)
+    def search(session, on_progress):
+        return search_jobs(
+            keyword,
+            location,
+            session=session,
+            on_progress=on_progress,
+            max_jobs=max_jobs,
+        )
 
-    if max_jobs:
-        jobs = jobs[:max_jobs]
-
-    total = len(jobs)
-    for idx, job in enumerate(jobs, start=1):
-        if on_progress:
-            on_progress("detail", idx, total, job["title"])
-        get_job_detail(job, session)
-        if idx < total:
-            time.sleep(delay)
-
-    now = datetime.now().isoformat(timespec="seconds")
-    for job in jobs:
-        job["scraped_at"] = now
-
-    return jobs
+    return run_scrape(
+        search_fn=search,
+        enrich_fn=get_job_detail,
+        session=_new_session(),
+        delay=delay,
+        max_jobs=max_jobs,
+        on_progress=on_progress,
+    )

@@ -29,9 +29,11 @@ Aplikasi command-line untuk mengambil lowongan kerja dari beberapa situs, lalu m
 
 - Multi-sumber: **Glints**, **LinkedIn**, dan **Tech in Asia**.
 - Detail lowongan: judul, perusahaan, lokasi, gaji, tipe kerja, tanggal, deskripsi, dan skill.
+- Gaji dan tanggal punya versi terstruktur (`salary_min`, `salary_max`, `currency`, `salary_period`, `posted_at`) di samping teks tampilan.
+- Dedup lowongan **lintas sumber**; sumber asal lainnya disimpan di kolom `also_on`.
 - Output sekaligus: HTML interaktif + CSV + Excel + JSON.
 - Filter teks, filter sumber, pagination, dan toggle kartu/tabel di laporan HTML.
-- Peringatan bila suatu sumber gagal atau menghasilkan 0 lowongan.
+- Peringatan membedakan sumber **gagal** (mis. HTTP 999) dari sumber **0 hasil**.
 - Konfigurasi lewat file JSON dan/atau flag command-line.
 
 ---
@@ -94,6 +96,9 @@ python main.py --keyword "python" --sources Glints LinkedIn --pages 2 --max-jobs
 | `--pages`, `--max-pages` | dari config | Jumlah halaman per sumber (minimum 1). |
 | `--delay` | dari config | Jeda antar request dalam detik (minimum 0). |
 | `--max-jobs` | dari config | Batas lowongan per sumber. `0` berarti semua. |
+| `--respect-robots` | `false` | Opt-in: lewati URL yang dilarang `robots.txt` (bisa memblokir sebagian sumber). |
+| `--algolia-app-id` | env / config | Override Algolia app ID untuk Tech in Asia. |
+| `--algolia-api-key` | env / config | Override Algolia API key untuk Tech in Asia. |
 | `--config` | `config.json` | Path ke file konfigurasi JSON lain. |
 
 Flag yang diberikan selalu **meng-override** nilai di file config.
@@ -111,7 +116,10 @@ Flag yang diberikan selalu **meng-override** nilai di file config.
   "location": "Indonesia",
   "max_pages": 3,
   "delay": 1.0,
-  "max_jobs": 0
+  "max_jobs": 0,
+  "respect_robots": false,
+  "algolia_app_id": "",
+  "algolia_api_key": ""
 }
 ```
 
@@ -123,6 +131,11 @@ Flag yang diberikan selalu **meng-override** nilai di file config.
 | `max_pages` | number | `3` | Jumlah halaman. |
 | `delay` | number | `1.0` | Jeda antar request (detik). |
 | `max_jobs` | number | `0` | Batas per sumber; `0` = tanpa batas. |
+| `respect_robots` | boolean | `false` | Jika `true`, URL yang dilarang `robots.txt` dilewati. |
+| `algolia_app_id` | string | `""` | App ID Algolia; env var dan flag CLI lebih prioritas. |
+| `algolia_api_key` | string | `""` | API key Algolia; env var dan flag CLI lebih prioritas. |
+
+Prioritas kredensial: **flag CLI → environment variable → file config → kunci publik bawaan**.
 
 Key lain di luar tabel diabaikan. Kalau file config tidak ada atau rusak, aplikasi memakai default dan menampilkan peringatan.
 
@@ -175,6 +188,8 @@ output/data-analyst_20261124_143644.html
 
 Setiap run membuat file baru, jadi hasil lama tidak ditimpa. Folder `output/` sudah masuk `.gitignore`.
 
+Selain kolom teks biasa (`title`, `company`, `salary`, `posted_date`, dst.), setiap baris juga punya `salary_min`, `salary_max`, `currency`, `salary_period`, `posted_at` (ISO), dan `also_on` (sumber lain bila lowongan tergabung oleh dedup). Kolom turunan yang tidak tersedia dari situs diisi string kosong.
+
 ---
 
 ## Membaca laporan HTML
@@ -215,7 +230,7 @@ export TECHINASIA_ALGOLIA_API_KEY="API_KEY"
 python main.py --sources "Tech in Asia"
 ```
 
-Tanpa env var, aplikasi memakai nilai default dan mencetak peringatan.
+Flag `--algolia-app-id` / `--algolia-api-key` juga bisa dipakai sebagai pengganti env var. Tanpa keduanya, aplikasi memakai kunci pencarian publik bawaan dan mencetak peringatan. Kunci bawaan berasal dari frontend situs dan bisa dicabut sewaktu-waktu; untuk pemakaian rutin, sediakan kunci sendiri lewat env var atau flag.
 
 ---
 
@@ -225,7 +240,9 @@ Tanpa env var, aplikasi memakai nilai default dan mencetak peringatan.
 | --- | --- |
 | `Error: Jobstreet sedang tidak didukung (HTTP 403)` | Jobstreet sengaja dinonaktifkan. Pakai Glints, LinkedIn, atau Tech in Asia. |
 | `⚠️ Glints: pagination belum didukung...` | Glints hanya mengambil 1 halaman. Turunkan `--pages 1` atau terima perilaku ini. |
-| `⚠️ <sumber>: 0 lowongan...` | Bisa jadi memang tidak ada hasil, atau selector/API situs berubah. Coba kata kunci lain atau cek koneksi. |
+| `⚠️ <sumber>: 0 lowongan...` | Sumber berhasil diakses tapi tidak ada hasil, atau selector/API berubah. Coba kata kunci/lokasi lain. |
+| `<sumber>: gagal scraping — HTTP ...` | Sumber benar-benar gagal (mis. HTTP 999 dari LinkedIn). Bedakan dari "0 lowongan". |
+| `Ditolak robots.txt: ...` | Muncul bila `--respect-robots` aktif. Nonaktifkan flag bila ingin tetap mengambil data (periksa ToS situs). |
 | `⚠️ Tech in Asia: Algolia API key default...` | Informasi saja. Set env var di atas untuk menghilangkan peringatan. |
 | `Tidak ada lowongan ditemukan.` | Semua sumber gagal atau kosong. Periksa keyword, lokasi, dan koneksi internet. |
 | `ModuleNotFoundError: No module named ...` | Jalankan `pip install -r requirements.txt` di dalam virtual environment yang aktif. |
@@ -238,8 +255,9 @@ Tanpa env var, aplikasi memakai nilai default dan mencetak peringatan.
 - **Jobstreet dinonaktifkan** karena situs mengembalikan HTTP 403.
 - **Glints hanya 1 halaman**; `max_pages` diterima agar config konsisten, tapi tidak menambah hasil.
 - **Belum ada auto-apply**, tracking lamaran, atau notifikasi email.
-- Gaji dan tanggal masih disimpan sebagai teks (mis. `"Rp 6,000,000 per month"`, `"Posted 3d ago"`), belum numeric/ISO.
-- Dedup hanya per-sumber berdasarkan `job_id`, belum lintas sumber.
+- `salary_min` / `salary_max` diisi bila situs menyediakan angka; `posted_at` untuk teks relatif seperti `"3d ago"` bersifat **perkiraan** (dihitung dari waktu scraping).
+- Dedup lintas sumber memakai judul + perusahaan + lokasi yang dinormalisasi; dua lowongan berbeda dengan judul identik di perusahaan yang sama bisa tergabung.
+- `robots.txt` tidak diperiksa secara default; aktifkan dengan `--respect-robots` bila diperlukan.
 - Filter di laporan HTML tidak diekspor ke CSV/JSON.
 
 ---
@@ -250,7 +268,7 @@ Tanpa env var, aplikasi memakai nilai default dan mencetak peringatan.
 python -m pytest
 ```
 
-Test mencakup: validasi CLI, penolakan Jobstreet, URL Glints, override Algolia, dan render HTML (termasuk `$` pada gaji serta escaping `</script>`).
+Test mencakup: validasi CLI, penolakan Jobstreet, URL Glints, override Algolia, render HTML (termasuk `$` pada gaji serta escaping `</script>`), retry/`Retry-After`/`robots.txt`, parsing kartu LinkedIn, dedup lintas sumber, dan perbedaan catatan "gagal" vs "0 hasil" (19 test).
 
 ---
 
@@ -258,15 +276,17 @@ Test mencakup: validasi CLI, penolakan Jobstreet, URL Glints, override Algolia, 
 
 ```text
 job-auto-applier/
-├── main.py                  # CLI, orchestrasi, penulisan output
+├── main.py                  # CLI, orchestrasi, dedup, penulisan output
 ├── config.json              # Default konfigurasi
-├── scraper.py               # Helper umum + scraper Jobstreet (deprecated)
+├── schema.py                # Kolom, normalisasi gaji/tanggal, fingerprint dedup
+├── scraper.py               # Helper HTTP (retry, Retry-After, robots.txt) + I/O
+├── base_scraper.py          # Orkestrasi bersama search → detail → stempel waktu
 ├── glints_scraper.py        # Scraper Glints
 ├── linkedin_scraper.py      # Scraper LinkedIn (guest endpoint)
 ├── techinasia_scraper.py    # Scraper Tech in Asia via Algolia
 ├── html_report.py           # Generator laporan HTML mandiri
-├── requirements.txt         # Dependency runtime
-├── requirements-dev.txt     # Dependency test
+├── requirements.txt         # Dependency runtime (versi di-pin)
+├── requirements-dev.txt     # Dependency test (versi di-pin)
 ├── tests/                   # Test pytest
 └── output/                  # Hasil scraping (gitignore)
 ```
@@ -275,4 +295,4 @@ job-auto-applier/
 
 ## Catatan etis/legal
 
-Scraping situs pihak ketiga dapat melanggar Terms of Service. Gunakan jeda (`--delay`) yang wajar, hormati `robots.txt`, dan periksa kebijakan masing-masing situs sebelum memakai aplikasi untuk produksi.
+Scraping situs pihak ketiga dapat melanggar Terms of Service. Gunakan jeda (`--delay`) yang wajar dan periksa kebijakan masing-masing situs sebelum memakai aplikasi untuk produksi. Pengecekan `robots.txt` tersedia sebagai opsi `--respect-robots` (default mati karena sebagian besar situs lowongan melarang endpoint yang dipakai di sini); aktifkan bila kebijakan/internal Anda mensyaratkannya.

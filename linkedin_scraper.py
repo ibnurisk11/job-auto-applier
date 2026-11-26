@@ -1,14 +1,15 @@
 import re
 import time
-from datetime import datetime
 
 from bs4 import BeautifulSoup
 
+from base_scraper import run_scrape
+from schema import empty_job, parse_posted_text
 from scraper import ScraperError, _new_session, _safe_get
 
 SOURCE = "LinkedIn"
 
-# Guest endpoint: returns job cards as HTML without requiring a login session.
+# Endpoint guest: kartu lowongan tanpa perlu sesi login.
 SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 DETAIL_URL = "https://www.linkedin.com/jobs/view/{job_id}"
 
@@ -37,22 +38,22 @@ def _map_work_type(value):
 
 
 def _parse_cards(html, keyword):
-    """Parse guest cards; the numeric ID comes from `data-entity-urn`."""
+    """Parse kartu guest; ID numerik berasal dari ``data-entity-urn``."""
     soup = BeautifulSoup(html, "html.parser")
     jobs = []
     for card in soup.select("div.base-search-card"):
         urn = card.get("data-entity-urn") or ""
-        m = re.search(r"(\d+)$", urn)
-        if not m:
+        match = re.search(r"(\d+)$", urn)
+        if not match:
             continue
-        job_id = m.group(1)
+        job_id = match.group(1)
 
         title_el = card.select_one(".base-search-card__title")
         title = title_el.get_text(strip=True) if title_el else ""
 
         link_el = card.select_one("a.base-card__full-link")
-        url = link_el.get("href") if link_el else f"https://www.linkedin.com/jobs/view/{job_id}"
-        url = (url or "").split("?")[0]
+        url = link_el.get("href") if link_el else DETAIL_URL.format(job_id=job_id)
+        url = (url or "").split("?")[0].rstrip("/")
 
         company_el = card.select_one(".base-search-card__subtitle a")
         company = company_el.get_text(strip=True) if company_el else ""
@@ -63,23 +64,19 @@ def _parse_cards(html, keyword):
         date_el = card.select_one(".job-search-card__listdate")
         posted = date_el.get_text(strip=True) if date_el else ""
 
-        jobs.append(
+        job = empty_job(SOURCE, keyword)
+        job.update(
             {
-                "source": SOURCE,
-                "keyword": keyword,
                 "job_id": job_id,
                 "title": title,
                 "url": url,
                 "company": company,
                 "location": location,
-                "salary": "",
-                "work_type": "",
                 "posted_date": posted,
-                "description": "",
-                "skills": "",
-                "scraped_at": "",
+                "posted_at": parse_posted_text(posted),
             }
         )
+        jobs.append(job)
     return jobs
 
 
@@ -90,6 +87,7 @@ def search_jobs(
     delay=1.0,
     session=None,
     on_progress=None,
+    max_jobs=None,
 ):
     session = session or _new_session()
     keyword = keyword.strip()
@@ -105,18 +103,21 @@ def search_jobs(
         try:
             html = _safe_get(session, url, params=params)
         except ScraperError:
+            # Halaman pertama gagal = sumber benar-benar bermasalah; laporkan.
+            if page == 1:
+                raise
             break
         page_jobs = _parse_cards(html, keyword)
         if not page_jobs:
             break
-        # The guest API returns a variable number of cards (usually 10), so
-        # advance by what we actually got instead of a fixed page size.
-        # Duplicates across pages are removed below via `seen`.
+        # Guest API mengembalikan jumlah kartu yang berubah-ubah.
         start += len(page_jobs)
-        new_jobs = [j for j in page_jobs if j["job_id"] not in seen]
+        new_jobs = [job for job in page_jobs if job["job_id"] not in seen]
         for job in new_jobs:
             seen.add(job["job_id"])
         results.extend(new_jobs)
+        if max_jobs and len(results) >= max_jobs:
+            return results[:max_jobs]
         if page < max_pages:
             time.sleep(delay)
 
@@ -124,7 +125,7 @@ def search_jobs(
 
 
 def get_job_detail(job, session=None, retries=2):
-    """Enrich a card in place; detail markup varies, so every selector is optional."""
+    """Perkaya kartu; setiap selector bersifat opsional."""
     session = session or _new_session()
     url = DETAIL_URL.format(job_id=job["job_id"])
     try:
@@ -142,30 +143,32 @@ def get_job_detail(job, session=None, retries=2):
     if company_el:
         job["company"] = company_el.get_text(strip=True)
 
-    loc_el = None
-    for flavor in soup.select(".topcard__flavor"):
-        if flavor.select(".topcard__org-name-link"):
+    flavor = None
+    for item in soup.select(".topcard__flavor"):
+        if item.select(".topcard__org-name-link"):
             continue
-        text = flavor.get_text(strip=True)
-        if text and "ago" not in text.lower():
-            loc_el = flavor
+        text = item.get_text(strip=True)
+        if text and "ago" not in text.lower() and "lalu" not in text.lower():
+            flavor = item
             break
-    if loc_el is None:
-        loc_el = soup.select_one(".topcard__flavor")
-    if loc_el is not None:
-        text = loc_el.get_text(strip=True)
+    if flavor is None:
+        flavor = soup.select_one(".topcard__flavor")
+    if flavor is not None:
+        text = flavor.get_text(strip=True)
         if text:
             job["location"] = text
 
     date_el = soup.select_one(".posted-time-ago__text")
     if date_el:
-        job["posted_date"] = date_el.get_text(strip=True)
+        posted = date_el.get_text(strip=True)
+        job["posted_date"] = posted
+        job["posted_at"] = parse_posted_text(posted)
 
     desc_el = soup.select_one("div.show-more-less-html__markup")
     if desc_el:
         job["description"] = desc_el.get_text("\n", strip=True)
 
-    # "Employment type" is localized ("Jenis pekerjaan" in Indonesian).
+    # "Employment type" bisa lokal ("Jenis pekerjaan").
     criteria = {}
     for item in soup.select("li.description__job-criteria-item"):
         header = item.select_one(".description__job-criteria-subheader")
@@ -189,27 +192,25 @@ def scrape(
     max_jobs=None,
     on_progress=None,
 ):
-    session = _new_session()
-
     if on_progress:
         on_progress("search", 0, max_pages, "")
-    jobs = search_jobs(
-        keyword, location, max_pages, delay, session, on_progress=on_progress
+
+    def search(session, on_progress):
+        return search_jobs(
+            keyword,
+            location,
+            max_pages,
+            delay,
+            session=session,
+            on_progress=on_progress,
+            max_jobs=max_jobs,
+        )
+
+    return run_scrape(
+        search_fn=search,
+        enrich_fn=get_job_detail,
+        session=_new_session(),
+        delay=delay,
+        max_jobs=max_jobs,
+        on_progress=on_progress,
     )
-
-    if max_jobs:
-        jobs = jobs[:max_jobs]
-
-    total = len(jobs)
-    for idx, job in enumerate(jobs, start=1):
-        if on_progress:
-            on_progress("detail", idx, total, job["title"])
-        get_job_detail(job, session)
-        if idx < total:
-            time.sleep(delay)
-
-    now = datetime.now().isoformat(timespec="seconds")
-    for job in jobs:
-        job["scraped_at"] = now
-
-    return jobs
